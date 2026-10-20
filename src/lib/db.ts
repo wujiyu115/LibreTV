@@ -211,11 +211,19 @@ export async function clearLiveProbeResultsDb(): Promise<void> {
 export async function exportConfig(): Promise<string> {
   // 导出前 flush：把节流缓冲中的最新设置落盘，避免导出的是 800ms 前的旧快照
   flushPendingPersist();
-  const history = await db.history.toArray();
+  const [history, progress, searchHistory] = await Promise.all([
+    db.history.toArray(),
+    db.progress.toArray(),
+    db.searchHistory.toArray(),
+  ]);
   const settings = localStorage.getItem(PERSIST_KEY);
 
   const data: Record<string, unknown> = {
     viewingHistory: JSON.stringify(history),
+    // 播放进度与搜索历史同样属于用户手造的数据，不导出的话
+    // 「备份一份」实际上只备份了一半（换设备时进度全丢）
+    progress: JSON.stringify(progress),
+    searchHistory: JSON.stringify(searchHistory),
   };
   if (settings) data[PERSIST_KEY] = settings;
 
@@ -261,6 +269,37 @@ export async function importConfig(content: string): Promise<void> {
         duration: typeof item.duration === 'number' ? item.duration : 0,
         timestamp: typeof item.timestamp === 'number' ? item.timestamp : Date.now(),
       });
+    }
+  }
+
+  // 播放进度与搜索历史：同样包在 try 里，某一项格式不对不该让整次导入失败
+  if (typeof data['progress'] === 'string') {
+    try {
+      const rows = JSON.parse(data['progress']) as unknown;
+      if (Array.isArray(rows) && rows.length > 0) {
+        const clean = rows.filter(
+          (r): r is ProgressEntry =>
+            !!r && typeof r === 'object' && typeof (r as { key?: unknown }).key === 'string'
+        );
+        if (clean.length > 0) await db.progress.bulkPut(clean);
+      }
+    } catch {
+      // 忽略该段损坏
+    }
+  }
+
+  if (typeof data['searchHistory'] === 'string') {
+    try {
+      const rows = JSON.parse(data['searchHistory']) as unknown;
+      if (Array.isArray(rows) && rows.length > 0) {
+        const clean = rows.filter(
+          (r): r is SearchHistoryEntry =>
+            !!r && typeof r === 'object' && typeof (r as { text?: unknown }).text === 'string'
+        );
+        if (clean.length > 0) await db.searchHistory.bulkPut(clean);
+      }
+    } catch {
+      // 忽略该段损坏
     }
   }
 }
