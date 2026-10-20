@@ -8,6 +8,7 @@ import { RecommendSection } from '@/components/douban-section';
 import { DetailModal } from '@/components/detail-modal';
 import { AggregatedCard, aggregateResults } from '@/components/video-card';
 import { useAppStore, resolveSource, isInDisabledSubscription, isSourceDisabled } from '@/lib/store';
+import { filterAdultResults } from '@/lib/cms-parser';
 import { api } from '@/lib/client-api';
 import type { SearchResultItem, SourceSearchOutcome } from '@/lib/types';
 import { SearchHistoryDropdown, useSearchHistory } from '@/components/search-history';
@@ -141,10 +142,12 @@ function HomeContent() {
   };
 
   const isSearching = Boolean(urlQuery) && searchQuery.isFetching && !searchQuery.data;
-  // 聚合数据未就绪时，用已结算源的结果增量渲染（健康源不再等坏源超时）
+  // 聚合数据未就绪时，用已结算源的结果增量渲染（健康源不再等坏源超时）。
+  // 流式结果必须在这里就过成人过滤：服务端的过滤只在聚合后的 done 事件里做，
+  // 中间态若原样渲染，源站返回的成人条目会在搜索过程中先闪出来一遍。
   const streamedList = useMemo(
-    () => streamedOutcomes.flatMap((o) => o.list),
-    [streamedOutcomes]
+    () => filterAdultResults(streamedOutcomes.flatMap((o) => o.list), yellowFilter),
+    [streamedOutcomes, yellowFilter]
   );
   const list = useMemo(
     () => searchQuery.data?.list ?? (isSearching ? streamedList : []),

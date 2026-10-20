@@ -1,8 +1,11 @@
+import { ADULT_RESULT_KEYWORDS, isAdultContent } from './adult-filter';
 import type { SearchResultItem, VideoDetail } from './types';
 
 /**
  * Apple CMS（苹果CMS）资源站响应解析
  * 与旧版 js/api.js 逻辑对齐，迁移为纯函数以便单元测试。
+ *
+ * 成人内容的关键词表与源级判定见 ./adult-filter（TVBOX 订阅导入也要用）。
  */
 
 const M3U8_PATTERN = /\$https?:\/\/[^"'\s]+?\.m3u8/g;
@@ -150,21 +153,24 @@ export function parseDetailPageHtml(
   };
 }
 
-/** 敏感分类过滤（成人内容过滤，关键词与旧版保持一致） */
-const ADULT_KEYWORDS = [
-  '伦理片', '福利', '倫理片', '福利片', '日本伦理', '日本福利', '日本福利片', '日本伦理片', '擦边短剧', '擦边', '韩国伦理','里番动漫', '门事件', '萝莉少女', '制服诱惑', '国产传媒',
-  'cosplay', '黑丝诱惑', '无码', '日本无码', '有码', '日本有码', 'SWAG',
-  '网红主播', '色情片', '同性片', '福利视频', '无码高清', '有码高清', '91视频', '自拍偷拍', 'mini传媒', '福利片',
-];
+/** 成人内容过滤：判定与关键词见 ./adult-filter（与订阅导入共享同一套词表） */
+export { ADULT_RESULT_KEYWORDS, isAdultContent };
 
-export function isAdultContent(typeName: string | undefined): boolean {
-  if (!typeName) return false;
-  return ADULT_KEYWORDS.some((k) => typeName.includes(k));
-}
-
-export function filterAdultResults<T extends { typeName?: string }>(items: T[], enabled: boolean): T[] {
+/**
+ * 丢弃成人结果。两道关卡：
+ *
+ * 1. **源级标记**（可靠）：源本身被判定为成人站时，它返回的一切都不展示。
+ *    这是主关卡——成人站的分类名是无穷的（实测杏吧用「颜值正义」「吃瓜黑料」
+ *   「国产主播」「熟女少妇」，词表法永远追不上），靠关键词叫停不了。
+ * 2. **分类关键词**（兜底）：源本身是混合站（主流影视 + 几个伦理片分类）时，
+ *    源级不能封杀，只能靠 typeName 逐条拦。
+ */
+export function filterAdultResults<T extends { typeName?: string; isAdult?: boolean }>(
+  items: T[],
+  enabled: boolean
+): T[] {
   if (!enabled) return items;
-  return items.filter((item) => !isAdultContent(item.typeName));
+  return items.filter((item) => !item.isAdult && !isAdultContent(item.typeName));
 }
 
 /**
@@ -200,9 +206,49 @@ export function isRelevant(name: string, wd: string): boolean {
 
 /**
  * 结果相关性过滤：丢弃与关键词无关的条目。
- * 过滤后为空时回退到原列表——宁可多展示也不把源站唯一可用的结果清空。
+ *
+ * 部分采集站会做分词/OR 模糊搜索（搜「摔跤吧！爸爸」返回一堆「爸爸XXX」），
+ * 逐条校验后只保留真正相关的结果。
+ *
+ * 匹配不到任何条目时不能整份原样回退：实测光速源搜「摔跤吧！爸爸」返回 100 条、
+ * 无一条命中关键词，旧的全量回退把这 100 条无关结果原样放行，相关性过滤形同失效。
+ *
+ * 但也不能直接清空：采集站支持按演员 / 标签检索（搜「刘德华」返回的片名里
+ * 本来就不会含关键词），清空会把这类正常搜索变成「无结果」。
+ * 折中：按「标题与关键词的最长公共子串」降序排，只取前 MAX_FALLBACK_RESULTS 条。
+ * 最接近的排前面，总量有上限，既不清空也不会把上百条无关结果全回放。
  */
 export function filterRelevantResults<T extends { name?: string }>(items: T[], wd: string): T[] {
   const filtered = items.filter((item) => isRelevant(item.name || '', wd));
-  return filtered.length > 0 ? filtered : items;
+  if (filtered.length > 0) return filtered;
+
+  const nWd = normalizeTitle(wd);
+  // 关键词归一化后为空（纯标点）：无从比较，按原顺序截断
+  if (!nWd) return items.slice(0, MAX_FALLBACK_RESULTS);
+
+  return items
+    .map((item) => ({ item, score: longestCommonSubstringLength(normalizeTitle(item.name || ''), nWd) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_FALLBACK_RESULTS)
+    .map((s) => s.item);
+}
+
+/** 降级匹配（相关性不成立时）最多保留的条数：给演员名检索留余地，又能拦住上百条无关结果 */
+export const MAX_FALLBACK_RESULTS = 40;
+
+/** 最长公共子串长度（滚动数组 DP，名称都很短，代价可忽略） */
+function longestCommonSubstringLength(a: string, b: string): number {
+  if (!a || !b) return 0;
+  let prev = new Array<number>(b.length + 1).fill(0);
+  let cur = new Array<number>(b.length + 1).fill(0);
+  let best = 0;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : 0;
+      if (cur[j] > best) best = cur[j];
+    }
+    [prev, cur] = [cur, prev];
+    cur.fill(0);
+  }
+  return best;
 }

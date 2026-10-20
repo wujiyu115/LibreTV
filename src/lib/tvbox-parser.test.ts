@@ -273,3 +273,85 @@ describe('parseSubscriptionJson', () => {
     expect(() => parseSubscriptionJson('<html>403 Forbidden</html>')).toThrow(/不是合法的 JSON/);
   });
 });
+
+describe('成人源标记（isAdult）', () => {
+  it('源名命中的成人站写入 isAdult: true', () => {
+    const result = parseTvboxPayload({
+      sites: [
+        vodSite('https://a.example.com/api.php/provide/vod', { name: '🍊大奶' }),
+        vodSite('https://b.example.com/api.php/provide/vod', { name: '成人51' }),
+        vodSite('https://c.example.com/api.php/provide/vod', { name: '🔞乐播资源' }),
+      ],
+    });
+
+    expect(result.sources.map((s) => s.isAdult)).toEqual([true, true, true]);
+  });
+
+  it('正常源不带 isAdult 字段（保持既有对象形态）', () => {
+    const result = parseTvboxPayload({
+      sites: [vodSite('https://a.example.com/api.php/provide/vod', { name: '光速资源' })],
+    });
+
+    expect(result.sources[0]).toEqual({
+      name: '光速资源',
+      url: 'https://a.example.com/api.php/provide/vod',
+    });
+    expect('isAdult' in result.sources[0]).toBe(false);
+  });
+
+  it('分类占比达到阈值的纯成人站写入 isAdult', () => {
+    const result = parseTvboxPayload({
+      sites: [
+        vodSite('https://a.example.com/api.php/provide/vod', {
+          name: '🧿番外┃采集',
+          categories: ['群交淫乱', '偷拍自拍', '无码专区', '中文字幕', '伦理三级', '虚拟VR'],
+        }),
+      ],
+    });
+
+    expect(result.sources[0].isAdult).toBe(true);
+  });
+
+  it('混合源不标记（主流影视 + 少量伦理分类）', () => {
+    const result = parseTvboxPayload({
+      sites: [
+        vodSite('https://a.example.com/api.php/provide/vod', {
+          name: '🎀光速┃采集',
+          categories: ['电影', '电视剧', '综艺', '动漫', '动作片', '喜剧片', '伦理片', '记录片'],
+        }),
+      ],
+    });
+
+    expect('isAdult' in result.sources[0]).toBe(false);
+  });
+
+  it('同址重复条目合并成人标记（带分类的那条往往排在后面）', () => {
+    // 实测 fhapi9.com 在订阅里出现 4 次：前几条无 categories，「番外」那条带 16 个成人分类
+    const result = parseTvboxPayload({
+      sites: [
+        vodSite('https://fh.example.com/api.php/provide/vod', { name: '凤凰' }),
+        vodSite('https://fh.example.com/api.php/provide/vod/', { name: '番号', categories: [] }),
+        vodSite('https://fh.example.com/api.php/provide/vod', {
+          name: '番外┃采集',
+          categories: ['群交淫乱', '偷拍自拍', '无码专区', '伦理三级', '虚拟VR', '少女萝莉'],
+        }),
+      ],
+    });
+
+    expect(result.sources).toHaveLength(1);
+    // 首条（无标记）被保留，但后续条目的成人判定结果合并上来
+    expect(result.sources[0].isAdult).toBe(true);
+  });
+
+  it('重复条目中只要有一条判成人，最终就带标记', () => {
+    const result = parseTvboxPayload({
+      sites: [
+        vodSite('https://x.example.com/api.php/provide/vod', { name: '正常源' }),
+        vodSite('https://x.example.com/api.php/provide/vod', { name: '色逼' }),
+      ],
+    });
+
+    expect(result.sources).toHaveLength(1);
+    expect(result.sources[0].isAdult).toBe(true);
+  });
+});

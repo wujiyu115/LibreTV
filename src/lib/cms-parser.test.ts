@@ -4,6 +4,7 @@ import {
   extractM3u8FromText,
   filterAdultResults,
   filterRelevantResults,
+  MAX_FALLBACK_RESULTS,
   isAdultContent,
   isRelevant,
   normalizeTitle,
@@ -148,6 +149,26 @@ describe('成人内容过滤', () => {
     expect(filterAdultResults(items, true)).toEqual([{ typeName: '剧情片' }]);
     expect(filterAdultResults(items, false)).toHaveLength(2);
   });
+
+  it('源级 isAdult 传导到结果：成人源返回的任何内容都丢弃', () => {
+    // 实测杏吧源的分类是「颜值正义」「吃瓜黑料」「国产主播」「熟女少妇」，
+    // 全部不在词表里——成人站的分类名无穷无尽，靠关键词追不上，
+    // 只能靠源级标记把整源结果丢掉。
+    const items = [
+      { typeName: '颜值正义', isAdult: true },
+      { typeName: '吃瓜黑料', isAdult: true },
+      { typeName: '科幻片', isAdult: true }, // 源是成人源，正常分类也不可信
+      { typeName: '科幻片' },
+    ];
+
+    expect(filterAdultResults(items, true)).toEqual([{ typeName: '科幻片' }]);
+  });
+
+  it('源级 isAdult 在关闭过滤时不生效（用户主动放行）', () => {
+    const items = [{ typeName: '颜值正义', isAdult: true }];
+
+    expect(filterAdultResults(items, false)).toHaveLength(1);
+  });
 });
 
 describe('normalizeTitle', () => {
@@ -199,8 +220,45 @@ describe('filterRelevantResults', () => {
     expect(out.map((i) => i.name)).toEqual(['摔跤吧！爸爸', '摔跤吧!爸爸【影视解说】']);
   });
 
-  it('全部不相关时回退为原列表', () => {
+  it('全部不相关时按得分降序并限流，不再全量回退', () => {
+    // 旧行为是全量回退（等于过滤失效）：实测光速源搜「摔跤吧！爸爸」返回 100 条、
+    // 无一条命中关键词，全量放行会把这 100 条无关结果原样展出来。
     const junk = [{ name: '爸爸当家' }, { name: '爸爸别走' }];
-    expect(filterRelevantResults(junk, wd)).toEqual(junk);
+    const out = filterRelevantResults(junk, wd);
+
+    // 公共子串「爸爸」得分高的排前面，但仍受总量上限约束
+    expect(out.length).toBeLessThanOrEqual(junk.length);
+    expect(out.every((i) => junk.includes(i))).toBe(true);
+  });
+
+  it('完全无交集的条目被截断，不再返回全量', () => {
+    // 100 条和关键词毫无共同子串的结果：不能全部放行
+    const junk = Array.from({ length: 100 }, (_, i) => ({ name: `zzz电影${i}` }));
+    const out = filterRelevantResults(junk, wd);
+
+    expect(out.length).toBeLessThan(junk.length);
+    expect(out.length).toBeLessThanOrEqual(MAX_FALLBACK_RESULTS);
+  });
+
+  it('降级匹配按得分降序，最接近的排前面', () => {
+    const items2 = [
+      { name: '完全无关' },    // 0 分
+      { name: '摔跤手' },      // 与「摔跤吧爸爸」公共子串「摔跤」= 2
+      { name: '爸爸' },        // 「爸爸」= 2
+    ];
+    const out = filterRelevantResults(items2, wd);
+
+    // 不再只留最高档（游泳名检索这类场景会被误杀），而是降序排 + 总量封顶；
+    // 「完全无关」仍在结果里，但排在最后
+    expect(out[out.length - 1].name).toBe('完全无关');
+  });
+
+  it('关键词归一化后为空时视为不过滤（既有语义）', () => {
+    // 纯标点关键词经 normalizeTitle 后为空，isRelevant 走「空关键词不参与过滤」分支，
+    // 不会进入降级匹配。这里锁定既有语义，避免以后误以为它会被截断。
+    const junk = Array.from({ length: 100 }, (_, i) => ({ name: `片${i}` }));
+    const out = filterRelevantResults(junk, '！？！');
+
+    expect(out).toHaveLength(100);
   });
 });

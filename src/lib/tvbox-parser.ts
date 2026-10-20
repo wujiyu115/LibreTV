@@ -1,3 +1,4 @@
+import { isAdultSource } from './adult-filter';
 import type { SourceListPayload, SubscriptionParseStats, SubscriptionSkipReason } from './types';
 import {
   MAX_LIVE_SOURCES,
@@ -284,9 +285,16 @@ export function describeParseStats(
   return parts.join('，');
 }
 
-/** 收集点播源：只接受 Apple CMS 直连接口 */
+/**
+ * 收集点播源：只接受 Apple CMS 直连接口。
+ *
+ * 同时给成人站打 isAdult 标记——TVBOX 配置里成人站通常不带 categories，
+ * 只能靠源名识别；不带标记时下游所有防护（(18+) 徽章、默认不勾选、
+ * 关掉过滤才能启用）全部失效，成人源会静默混进搜索结果。
+ */
 function collectVodSources(rawSites: unknown[], skipped: SkipCounter) {
-  const seen = new Set<string>();
+  /** url → 在该地址上已产出的源下标，用于重复条目合并成人标记 */
+  const indexByUrl = new Map<string, number>();
   const sources: SourceListPayload['sources'] = [];
   let truncated = 0;
 
@@ -330,16 +338,47 @@ function collectVodSources(rawSites: unknown[], skipped: SkipCounter) {
       markSkipped(skipped, 'invalidUrl', name);
       continue;
     }
-    if (seen.has(url)) continue; // 重复条目静默跳过，与 LibreTV 订阅语义一致
+    const adult = isAdultSource(site.categories, name);
+    const existing = indexByUrl.get(url);
+    if (existing !== undefined) {
+      // 重复条目静默跳过，与 LibreTV 订阅语义一致；但同址重复出现在共享配置里很常见，
+      // 且**往往只有后面那条带 categories**（实测 fhapi9 出现 4 次，带 16 个成人分类的
+      // 排第 4）。只保留首条会丢掉分类信息，所以这里把已判定出的成人标记合并上去。
+      if (adult) sources[existing].isAdult = true;
+      continue;
+    }
     if (sources.length >= MAX_VOD_SOURCES) {
       truncated += 1;
       continue;
     }
-    seen.add(url);
-    sources.push({ name: name || hostnameOf(url), url });
+    indexByUrl.set(url, sources.length);
+    sources.push({
+      name: name || hostnameOf(url),
+      url,
+      // 仅成人源带标记：保持正常源的既有对象形态（不写 isAdult: false）
+      ...(adult ? { isAdult: true } : null),
+    });
+  }
+
+  // 同一后端的成人标记传播：订阅里常把同一采集站写成 `.../vod` 与 `.../vod?ac=list`
+  // 两种形式（实测 slapibf.com 的「gay┃资源」与「森林」就是如此），去重拦不住
+  // （URL 字符串不同，也必须不同——带 ?ac=list 的那条要按原样请求）。
+  // 二者其实是同一个站，成人标记必须一起打，否则换了个名字的成人源就绕过过滤了。
+  const adultBackends = new Set<string>();
+  for (const s of sources) {
+    if (s.isAdult) adultBackends.add(backendKey(s.url));
+  }
+  for (const s of sources) {
+    if (!s.isAdult && adultBackends.has(backendKey(s.url))) s.isAdult = true;
   }
 
   return { sources, truncated };
+}
+
+/** 后端身份：去掉查询串与尾部斜杠，用于把「同一采集站的不同写法」归到一起 */
+function backendKey(url: string): string {
+  const noQuery = url.split('?')[0].split('#')[0];
+  return noQuery.replace(/\/+$/, '').toLowerCase();
 }
 
 /** 收集直播源：只接受 M3U 播放列表 */
