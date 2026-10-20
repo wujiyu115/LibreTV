@@ -266,3 +266,45 @@ export async function importConfig(content: string): Promise<void> {
 }
 
 export type { SourceConfig };
+
+// —— 服务端同步用的批量读写 ——
+
+/**
+ * 导出个人数据快照（同步到服务端用）。
+ * 只取同步范围内的三张表：history / progress / searchHistory。
+ * downloads 与 segmentMeta 指向本地文件字节，跨设备没有意义，不导出。
+ */
+export async function exportPersonalData(): Promise<{
+  history: HistoryEntry[];
+  progress: ProgressEntry[];
+  searchHistory: SearchHistoryEntry[];
+}> {
+  const [history, progress, searchHistory] = await Promise.all([
+    db.history.toArray(),
+    db.progress.toArray(),
+    db.searchHistory.toArray(),
+  ]);
+  return { history, progress, searchHistory };
+}
+
+/**
+ * 把服务端快照写回本地（首次登录到新设备 / 服务端数据更新时）。
+ *
+ * 全量替换而不是合并：三张表都有明确的容量上限（100 / 5000 / 10）且以
+ * 服务端为准，逐条合并反而会让本地残留服务端已删除的记录（例如在 A 设备
+ * 删掉一条历史，B 设备合并后它又回来了）。
+ */
+export async function importPersonalData(data: {
+  history?: HistoryEntry[];
+  progress?: ProgressEntry[];
+  searchHistory?: SearchHistoryEntry[];
+}): Promise<void> {
+  await db.transaction('rw', db.history, db.progress, db.searchHistory, async () => {
+    await db.history.clear();
+    await db.progress.clear();
+    await db.searchHistory.clear();
+    if (data.history?.length) await db.history.bulkPut(data.history);
+    if (data.progress?.length) await db.progress.bulkPut(data.progress);
+    if (data.searchHistory?.length) await db.searchHistory.bulkPut(data.searchHistory);
+  });
+}

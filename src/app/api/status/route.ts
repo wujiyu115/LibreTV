@@ -5,6 +5,7 @@ import { getEnvLiveSources } from '@/lib/env-live-sources';
 import { getEnvSubscriptions } from '@/lib/env-subscriptions';
 import { getEnvRecommendSource } from '@/lib/env-recommend-source';
 import { getEnvImageMode } from '@/lib/env-image-mode';
+import { isDataDirWritable } from '@/lib/server-storage';
 
 export const runtime = 'nodejs';
 
@@ -27,5 +28,10 @@ export async function GET(req: Request) {
     defaultRecommendSource: getEnvRecommendSource() ?? null,
     // 部署者通过 DEFAULT_IMAGE_MODE 指定的封面图加载方式默认值（未配置时为 null）
     defaultImageMode: getEnvImageMode() ?? null,
+    // 服务端数据目录是否可写：部署时忘了挂载 DATA_DIR 的话，
+    // 所有配置只能存在浏览器里（一换设备就丢），界面需要能提示这一点。
+    // 探测本身很轻（建目录 + 写删一个小文件），但为了不给每个页面都加一次磁盘 IO，
+    // 这里只在登录后（verified）才探测——未登录时本来也不会写配置。
+    storageWritable: verified ? await isDataDirWritable() : null,
   });
 }

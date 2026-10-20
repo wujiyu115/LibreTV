@@ -140,6 +140,12 @@ export interface AuthStatusResponse {
   defaultRecommendSource: 'douban' | 'bangumi' | 'hot-list' | null;
   /** 部署者通过 DEFAULT_IMAGE_MODE 环境变量指定的封面图加载方式默认值（未配置时为 null） */
   defaultImageMode: 'direct' | 'proxy' | null;
+  /**
+   * 服务端数据目录（DATA_DIR）是否可写。
+   * null 表示未登录、未做探测；false 说明部署时没挂载可写目录，
+   * 配置只能存在浏览器里，换设备会丢——界面需要提示出来。
+   */
+  storageWritable?: boolean | null;
 }
 
 // —— 直播 / IPTV ——

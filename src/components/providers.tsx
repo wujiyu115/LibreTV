@@ -38,7 +38,11 @@ export function Providers({ children }: { children: ReactNode }) {
         // 预置数据（DEFAULT_SOURCES / DEFAULT_LIVE_SOURCES / DEFAULT_SUBSCRIPTIONS）
         // 预置订阅要经鉴权接口拉取，首屏这次可能发生在登录之前而 401 静默失败；
         // 登录成功后由 AuthProvider 再调一次 applyEnvPresets 补齐（函数幂等）
-        if (d) return applyEnvPresets(d);
+        if (!d) return;
+        // 注意：这里不启动服务端同步。同步的触发条件是「会话有效」，
+        // 而 /api/status 走 React Query 缓存（staleTime 60s），此处的 d.verified
+        // 可能是登录前的旧值。统一由 AuthProvider 监听 verified 变化后触发。
+        return applyEnvPresets(d);
       })
       .catch(() => {});
   }, [queryClient]);

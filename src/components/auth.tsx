@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { useQueryClient } from '@tanstack/react-query';
 import { api, onUnauthorized, STATUS_QUERY_KEY } from '@/lib/client-api';
 import { applyEnvPresets } from '@/lib/subscription-sync';
+import { startSync, stopSync } from '@/lib/settings-sync';
 import type { AuthStatusResponse } from '@/lib/types';
 import { useToast } from './toast';
 
@@ -34,6 +35,15 @@ const AuthContext = createContext<AuthContextValue>({
   openLogin: () => {},
   logout: async () => {},
 });
+
+/**
+ * 登录后延迟多久启动同步。
+ *
+ * 必须晚于 applyEnvPresets：那个函数会把 DEFAULT_SOURCES 等预置源合并进 store，
+ * 同步若先跑，服务端快照会把它刚写入的勾选状态覆盖掉（预置源看起来「没勾上」）。
+ * 1 秒是这个合并与首屏渲染的宽松上限（合并只是内存操作 + 一次可缓存的请求）。
+ */
+const SYNC_START_DELAY_MS = 1000;
 
 export function useAuth(): AuthContextValue {
   return useContext(AuthContext);
@@ -81,10 +91,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const openLogin = useCallback(() => setModalOpen(true), []);
 
+  /**
+   * 会话有效时启动服务端同步（登录成功、或带着已有 cookie 直接打开页面）。
+   *
+   * 放在这里而不是 Providers 的初始化链里：Providers 拿到的 /api/status 来自
+   * React Query 缓存（staleTime 60s），页面首屏那次可能发生在登录之前，
+   * verified 是旧值。AuthProvider 的 verified 是真实的会话状态。
+   *
+   * 还要晚一拍：等 applyEnvPresets（由 handleLoginSuccess / checkAuth 触发）
+   * 把预置源合并进 store 之后再同步，否则服务端快照会盖掉预置源的勾选状态。
+   */
+  useEffect(() => {
+    if (!verified) return;
+    const timer = setTimeout(() => void startSync(), SYNC_START_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [verified]);
+
   const logout = useCallback(async () => {
     try {
       await api.logout();
     } finally {
+      // 先停同步再改状态：否则 setVerified 触发的重渲染期间
+      // 仍可能有待推送的改动打向已失效的会话（401）
+      stopSync();
       setVerified(false);
       toast('已退出登录', 'info');
     }
@@ -112,6 +141,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // 补拉预置数据失败不影响登录后的正常使用
     }
+    // 同上：同步也要排在 applyEnvPresets 之后，否则服务端快照会盖掉预置源的勾选状态。
+    // 实际启动由上方监听 verified 的 effect 完成（那边覆盖了「带 cookie 直接打开」的场景）。
   }, [toast, queryClient]);
 
   return (

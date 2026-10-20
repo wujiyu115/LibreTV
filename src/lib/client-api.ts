@@ -1,6 +1,7 @@
 'use client';
 
 import type { SearchResponse, SearchStreamEvent, SourceSearchOutcome, VideoDetail, DoubanResponse, BangumiCalendarResponse, AuthStatusResponse, SourceConfig, SearchResultItem, LivePlaylistResponse, LiveEpgResponse, SourceListPayload, QualityProbeItem, QualityProbeResult } from './types';
+import type { SettingsConflictResponse, SettingsGetResponse, SettingsPutRequest, SettingsPutResponse } from './sync-types';
 
 /**
  * 客户端 API 封装。401 时触发全局事件打开登录框，
@@ -116,6 +117,49 @@ export const api = {
     }),
 
   logout: () => request<{ success: boolean }>('/api/auth', { method: 'DELETE' }),
+
+  /**
+   * 读取服务端配置（服务端为零一初始化与多设备同步的入口）。
+   * 未登录返 401，由 throwForAuthStatus 统一触发登录框。
+   */
+  getSettings: () =>
+    request<SettingsGetResponse>('/api/settings', { cache: 'no-store' }),
+
+  /**
+   * 写入服务端配置。服务端带乐观并发检测：baseUpdatedAt 与服务端当前值
+   * 不一致时返 409 + 当前版本，由调用方提示用户选择覆盖方向。
+   */
+  putSettings: async (body: SettingsPutRequest): Promise<SettingsPutResponse> => {
+    const res = await fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    // 409 需要把服务端的版本信息带给调用方，而通用 request() 会直接抛 ApiError
+    // 丢掉这些字段，所以这里单独处理
+    if (res.status === 409) {
+      const data = (await res.json().catch(() => ({}))) as Partial<SettingsConflictResponse>;
+      throw Object.assign(new ApiError(data.error || '配置冲突', 409), {
+        status: 409,
+        conflict: true,
+        updatedAt: data.updatedAt ?? 0,
+        deviceId: data.deviceId ?? '',
+      });
+    }
+    throwForAuthStatus(res);
+    if (!res.ok) {
+      let msg = `请求失败 (${res.status})`;
+      try {
+        const data = (await res.json()) as { error?: string };
+        if (data?.error) msg = data.error;
+      } catch { /* 忽略解析失败 */ }
+      throw new ApiError(msg, res.status);
+    }
+    return (await res.json()) as SettingsPutResponse;
+  },
+
+  /** 清空服务端配置（界面上的「重置服务端数据」入口） */
+  deleteSettings: () => request<{ ok: boolean }>('/api/settings', { method: 'DELETE' }),
 
   /**
    * 聚合搜索。传入 onSource 时走 /api/search?stream=1 的 NDJSON 流：
