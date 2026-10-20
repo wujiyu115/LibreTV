@@ -18,6 +18,12 @@ import {
   DESKTOP_CONTROL_HIDE_MS,
   TOUCH_CONTROL_HIDE_MS,
 } from '@/lib/control-hide';
+import { applyRotate, clearRotate } from '@/lib/orientation';
+
+/** 横屏图标：外框横置，表示「切换到横向」 */
+const ROTATE_ICON_LANDSCAPE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:22px;height:22px"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M7 12h10"/></svg>`;
+/** 竖屏图标：外框竖置，表示「切换到竖向」 */
+const ROTATE_ICON_PORTRAIT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:22px;height:22px"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M12 7v10"/></svg>`;
 
 /**
  * 播放器外壳：ArtPlayer + hls.js（旧版 player.js 的 React 化）。
@@ -70,6 +76,9 @@ export function PlayerShell({
   onRequestSwitchSource,
 }: PlayerShellProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  /** 整个播放器外壳（含提示条/错误遮罩）：手动旋转要转这个而不是内层容器，
+   * 否则 hint、错误遮罩等兄弟节点不会一起转，文字会歪 */
+  const shellRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const artRef = useRef<any>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -328,6 +337,54 @@ export function PlayerShell({
     endedRef.current = false;
 
     let lastSave = 0;
+    // effect 内固定捕获外壳节点：cleanup 阶段 ref.current 可能已置 null
+    const shellEl = shellRef.current;
+
+    // —— 手动横竖屏切换 ——
+    // 移动浏览器不会把页面转动到横屏（只有全屏 + 系统未锁方向时才会），
+    // 系统开了方向锁的用户就只能看着竖屏里的小窗口。
+    // 这里不依赖任何系统 API（iOS 无 screen.orientation.lock）：
+    // 直接用 CSS rotate 把播放器转 90° 铺满视口。
+    let rotated = false;
+    const rotateTarget = () => ({
+      element: shellRef.current as HTMLElement,
+      body: document.body,
+    });
+    const syncRotateButton = (art: Artplayer) => {
+      art.controls.update({
+        name: 'rotate',
+        tooltip: rotated ? '切换为竖屏' : '切换为横屏',
+        html: rotated ? ROTATE_ICON_PORTRAIT : ROTATE_ICON_LANDSCAPE,
+      });
+    };
+    const toggleRotate = () => {
+      if (!shellRef.current) return;
+      rotated = !rotated;
+      if (rotated) applyRotate(rotateTarget());
+      else clearRotate(rotateTarget());
+      const current = artRef.current;
+      if (current) syncRotateButton(current);
+      // 旋转改变视口尺寸，通知播放器重算进度条/控制栏布局
+      current?.emit('resize');
+      showHint(rotated ? '横屏' : '竖屏');
+    };
+
+    // 视口尺寸变化时重算旋转尺寸：
+    // 用户没开系统方向锁时，手动旋转后再转动手机，视口会变成横向，
+    // 此时旧的宽高已经不匹配（会露出背景）。重算一次即可贴合新视口。
+    let viewportTimer: ReturnType<typeof setTimeout> | null = null;
+    const onViewportChange = () => {
+      if (!rotated) return;
+      // 迟延一拍：iOS 上旋转时的 clientWidth/Height 在事件里可能还是旧值
+      if (viewportTimer) clearTimeout(viewportTimer);
+      viewportTimer = setTimeout(() => {
+        if (!rotated || !shellRef.current) return;
+        applyRotate(rotateTarget()); // 重新读写尺寸（视口已变）
+        artRef.current?.emit('resize');
+      }, 200);
+    };
+    window.addEventListener('orientationchange', onViewportChange);
+    window.addEventListener('resize', onViewportChange);
 
     const art = new Artplayer({
       container: containerRef.current,
@@ -351,6 +408,18 @@ export function PlayerShell({
       hotkey: false,
       theme: '#2563eb',
       lang: navigator.language.toLowerCase().startsWith('zh') ? 'zh-cn' : 'en',
+      // 旋转按钮放在「网页全屏」和「全屏」之间：这两个按钮管的是「容纳画面」，
+      // 旋转管的是「画面朝向」，放一起符合操作预期
+      controls: [
+        {
+          name: 'rotate',
+          position: 'right',
+          index: 65,
+          html: ROTATE_ICON_LANDSCAPE,
+          tooltip: '切换为横屏',
+          click: () => toggleRotate(),
+        },
+      ],
       moreVideoAttr: { crossOrigin: 'anonymous', playsInline: true },
       customType: {
         m3u8: (video: HTMLVideoElement, mediaUrl: string) => {
@@ -438,6 +507,27 @@ export function PlayerShell({
     art.on('video:ended', () => {
       endedRef.current = true;
       propsRef.current.onEnded?.();
+    });
+
+    // 进原生全屏时自动退出手动旋转：两者都会接管视口，叠加后画面会被转两次
+    // （全屏本身已铺满，再 rotate 90° 就成侧着了）。退出全屏后不自动转回，
+    // 保持用户点按钮时的意图即可。
+    art.on('fullscreen', (active: boolean) => {
+      if (active && rotated) {
+        rotated = false;
+        clearRotate(rotateTarget());
+        syncRotateButton(art);
+        showHint('已进全屏，已取消旋转');
+      }
+    });
+    // 网页全屏同理：它会自己铺满视口，叠加旋转会错位
+    art.on('fullscreenWeb', (active: boolean) => {
+      if (active && rotated) {
+        rotated = false;
+        clearRotate(rotateTarget());
+        syncRotateButton(art);
+        showHint('已进网页全屏，已取消旋转');
+      }
     });
 
     // —— 键盘快捷键（旧版 hotkey:false + 自定义逻辑的移植） ——
@@ -568,6 +658,16 @@ export function PlayerShell({
       restoreCleanupRef.current?.();
       restoreCleanupRef.current = null;
       Artplayer.CONTROL_HIDE_TIME = ART_DEFAULT_CONTROL_HIDE_MS;
+      // 卸载时如果还在旋转态，必须把内联样式和 body 锁定撤销，
+      // 否则离开播放页后整页会一直停在「横向旋转 + 不能滚动」的状态。
+      // 用 effect 内捕获的 shell 而非 ref.current：cleanup 执行时 ref 可能已变化
+      if (rotated) {
+        rotated = false;
+        if (shellEl) clearRotate({ element: shellEl, body: document.body });
+      }
+      window.removeEventListener('orientationchange', onViewportChange);
+      window.removeEventListener('resize', onViewportChange);
+      if (viewportTimer) clearTimeout(viewportTimer);
       hlsRef.current?.destroy();
       hlsRef.current = null;
       recoveryRef.current?.dispose();
@@ -599,7 +699,7 @@ export function PlayerShell({
   }, [adFilter]);
 
   return (
-    <div className="relative w-full h-full">
+    <div ref={shellRef} className="relative w-full h-full">
       <div ref={containerRef} className="w-full h-full" style={{ WebkitTouchCallout: 'none' }} />
       {showPoster && !error && (
         <div
