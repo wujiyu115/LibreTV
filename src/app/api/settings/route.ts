@@ -3,8 +3,9 @@ import { guardRequest, jsonError } from '@/lib/api-guard';
 import {
   deleteSnapshot,
   isDataDirWritable,
+  mutateSnapshot,
   readSnapshot,
-  writeSnapshot,
+  VERSION_CONFLICT,
 } from '@/lib/server-storage';
 import {
   SYNC_SCHEMA_VERSION,
@@ -133,39 +134,39 @@ export async function PUT(req: Request) {
   const deviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : '';
   if (!deviceId) return jsonError('缺少 deviceId', 400);
 
-  // 乐观并发检测：客户端带了 baseUpdatedAt 且与服务端当前值不符，
-  // 说明期间有别的设备写过。默认拒绝并回传当前版本，让用户决定是否覆盖，
-  // 避免「手机上的改动被电脑上的旧页面静默冲掉」。
-  if (!body.force && typeof body.baseUpdatedAt === 'number') {
-    const current = await readSnapshot<SyncPayload>(PROFILE);
-    const currentUpdatedAt = current?.updatedAt ?? 0;
-    if (currentUpdatedAt !== body.baseUpdatedAt) {
+  // 乐观并发检测与写入必须在一个锁内完成：
+  // 先 readSnapshot 再 writeSnapshot 的话，两次加锁之间存在窗口，
+  // 两个请求可同时看到同一旧版本、双双通过检查，后者静默覆盖前者（丢修改）。
+  // 不带 baseUpdatedAt 时不校验（首次初始化）；force 用于用户确认「以本机为准」。
+  let result: { updatedAt: number; deviceId: string };
+  try {
+    result = await mutateSnapshot<SyncPayload>(PROFILE, () => ({
+      data: payload,
+      deviceId,
+      expectUpdatedAt: body.force ? undefined : body.baseUpdatedAt,
+    }));
+  } catch (err) {
+    const e = err as { code?: string; updatedAt?: number; deviceId?: string; message?: string };
+    if (e.code === VERSION_CONFLICT) {
       return NextResponse.json(
         {
           error: '服务端配置已被其他设备修改',
           conflict: true,
-          updatedAt: currentUpdatedAt,
-          deviceId: current?.deviceId ?? '',
+          updatedAt: e.updatedAt ?? 0,
+          deviceId: e.deviceId ?? '',
         },
         { status: 409 }
       );
     }
-  }
-
-  const updatedAt = Date.now();
-  try {
-    await writeSnapshot<SyncPayload>(PROFILE, payload, { updatedAt, deviceId });
-  } catch (err) {
-    const code = (err as { code?: string }).code;
-    if (code === 'TOO_LARGE') return jsonError('配置体积超出上限', 413);
+    if (e.code === 'TOO_LARGE') return jsonError('配置体积超出上限', 413);
     // 最常见的原因是没有挂载 /data（EROFS / EACCES），把这一点直接说出来
     return jsonError(
-      `配置写入失败：${err instanceof Error ? err.message : '未知错误'}（请确认 DATA_DIR 已挂载为可写目录）`,
+      `配置写入失败：${e.message ?? '未知错误'}（请确认 DATA_DIR 已挂载为可写目录）`,
       500
     );
   }
 
-  return NextResponse.json({ ok: true, updatedAt, deviceId });
+  return NextResponse.json({ ok: true, updatedAt: result.updatedAt, deviceId });
 }
 
 /** DELETE /api/settings：清空服务端配置（界面上的「重置」入口使用） */

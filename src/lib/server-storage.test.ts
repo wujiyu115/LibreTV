@@ -6,9 +6,11 @@ import {
   dataDir,
   deleteSnapshot,
   isDataDirWritable,
+  mutateSnapshot,
   readSnapshot,
   writeSnapshot,
   MAX_SNAPSHOT_BYTES,
+  VERSION_CONFLICT,
 } from './server-storage';
 
 let tmpDir: string;
@@ -141,5 +143,101 @@ describe('isDataDirWritable', () => {
     await isDataDirWritable();
     const files = await fs.readdir(tmpDir);
     expect(files.filter((f) => f.startsWith('.probe'))).toHaveLength(0);
+  });
+});
+
+describe('mutateSnapshot（并发安全与版本单调）', () => {
+  /**
+   * 回归：updatedAt 曾用纯 Date.now()，同一毫秒内两次写入版本号相同。
+   * 客户端拿着「和自己刚读到的旧版本相同」的 baseUpdatedAt 再来写时，
+   * 服务端比较相等 -> 判定无冲突 -> 静默覆盖另一台设备的修改。
+   * CI 上 ulid 跑得快时必现（本地跨过了毫秒边界所以偶发漏过）。
+   */
+  it('同一毫秒内连续写入，版本号严格递增', async () => {
+    const seen: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const r = await mutateSnapshot<{ i: number }>('default', () => ({
+        data: { i },
+        deviceId: 'd',
+      }));
+      seen.push(r.updatedAt);
+    }
+    // 严格递增（无重复、无回退）
+    for (let i = 1; i < seen.length; i++) {
+      expect(seen[i]).toBeGreaterThan(seen[i - 1]);
+    }
+    // 远快于毫秒时，说明确实靠 +1 在推进而不是真实时钟
+    expect(seen[seen.length - 1] - seen[0]).toBeGreaterThanOrEqual(19);
+  });
+
+  it('expectUpdatedAt 不匹配时抛 VERSION_CONFLICT 并带上当前版本', async () => {
+    const first = await mutateSnapshot<{ v: number }>('default', () => ({ data: { v: 1 }, deviceId: 'a' }));
+    const second = await mutateSnapshot<{ v: number }>('default', () => ({ data: { v: 2 }, deviceId: 'b' }));
+
+    await expect(
+      mutateSnapshot<{ v: number }>('default', () => ({
+        data: { v: 3 },
+        deviceId: 'a',
+        expectUpdatedAt: first.updatedAt, // 已过期
+      }))
+    ).rejects.toMatchObject({
+      code: VERSION_CONFLICT,
+      updatedAt: second.updatedAt,
+      deviceId: 'b',
+    });
+
+    // 失败的写入不落盘
+    const snap = await readSnapshot<{ v: number }>('default');
+    expect(snap!.data.v).toBe(2);
+  });
+
+  it('并发写入下只有一个能拿到期望版本，其余全部冲突（不丢修改）', async () => {
+    const base = await mutateSnapshot<{ from: string }>('default', () => ({
+      data: { from: 'init' },
+      deviceId: 'init',
+    }));
+
+    // 5 个设备同时带着同一个 baseUpdatedAt 来写
+    const results = await Promise.allSettled(
+      ['d1', 'd2', 'd3', 'd4', 'd5'].map((d) =>
+        mutateSnapshot<{ from: string }>('default', () => ({
+          data: { from: d },
+          deviceId: d,
+          expectUpdatedAt: base.updatedAt,
+        }))
+      )
+    );
+
+    const ok = results.filter((r) => r.status === 'fulfilled');
+    const conflicts = results.filter(
+      (r) => r.status === 'rejected' && (r.reason as { code?: string }).code === VERSION_CONFLICT
+    );
+    // 恰好一个成功，其余明确报冲突（而不是全部成功互相覆盖）
+    expect(ok).toHaveLength(1);
+    expect(conflicts).toHaveLength(4);
+
+    const snap = await readSnapshot<{ from: string }>('default');
+    const winner = (ok[0] as PromiseFulfilledResult<{ updatedAt: number; deviceId: string }>).value;
+    expect(snap!.data.from).toBe(winner.deviceId);
+  });
+
+  it('不带 expectUpdatedAt 时总是覆盖（初始化 / force 场景）', async () => {
+    await mutateSnapshot<{ v: number }>('default', () => ({ data: { v: 1 }, deviceId: 'a' }));
+    const r = await mutateSnapshot<{ v: number }>('default', () => ({ data: { v: 2 }, deviceId: 'b' }));
+    expect(r.deviceId).toBe('b');
+    const snap = await readSnapshot<{ v: number }>('default');
+    expect(snap!.data.v).toBe(2);
+  });
+
+  it('体积超限时不写坏已有文件', async () => {
+    await mutateSnapshot<{ ok: boolean }>('default', () => ({ data: { ok: true }, deviceId: 'a' }));
+    await expect(
+      mutateSnapshot<{ blob: string }>('default', () => ({
+        data: { blob: 'x'.repeat(MAX_SNAPSHOT_BYTES + 100) },
+        deviceId: 'b',
+      }))
+    ).rejects.toMatchObject({ code: 'TOO_LARGE' });
+    const snap = await readSnapshot<{ ok: boolean }>('default');
+    expect(snap!.data.ok).toBe(true);
   });
 });

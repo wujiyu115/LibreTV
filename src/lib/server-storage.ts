@@ -97,6 +97,19 @@ export async function readSnapshot<T>(profile: string): Promise<Snapshot<T> | nu
   }
 }
 
+/** 写入失败（体积超限）的标记码 */
+const TOO_LARGE = 'TOO_LARGE';
+
+/** 显式版本号冲突的标记码（由 mutateSnapshot 抛出） */
+export const VERSION_CONFLICT = 'VERSION_CONFLICT';
+
+/** 校验体积，超限就抛错 */
+function assertSize(payload: string): void {
+  if (Buffer.byteLength(payload, 'utf8') > MAX_SNAPSHOT_BYTES) {
+    throw Object.assign(new Error('配置体积超出上限'), { code: TOO_LARGE });
+  }
+}
+
 /**
  * 原子写快照。
  *
@@ -112,23 +125,72 @@ export async function writeSnapshot<T>(
   data: T,
   meta: SnapshotMeta
 ): Promise<void> {
-  const file = snapshotPath(profile);
   const payload = JSON.stringify({ ...meta, data });
-  if (Buffer.byteLength(payload, 'utf8') > MAX_SNAPSHOT_BYTES) {
-    throw Object.assign(new Error('配置体积超出上限'), { code: 'TOO_LARGE' });
-  }
-
+  assertSize(payload);
   await withLock(profile, async () => {
+    const file = snapshotPath(profile);
     await fs.mkdir(dataDir(), { recursive: true });
     const tmp = `${file}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 10)}`;
     try {
       await fs.writeFile(tmp, payload, 'utf8');
       await fs.rename(tmp, file);
     } catch (err) {
-      // 失败时清掉临时文件，避免残留堆积在 appdata 里
       await fs.rm(tmp, { force: true }).catch(() => undefined);
       throw err;
     }
+  });
+}
+
+/**
+ * 在一个锁内完成「读 → 校验版本 → 写」。
+ *
+ * 乐观并发必须整体原子：路由层先 readSnapshot 再 writeSnapshot 的话，
+ * 两次加锁之间存在窗口，两个请求可以同时看到同一个旧版本、双双通过检查，
+ * 第二个写入静默覆盖第一个（丢修改）。
+ *
+ * expectUpdatedAt 为 undefined 时不校验（首次初始化）；不匹配则抛
+ * code: 'VERSION_CONFLICT'，并带上服务端当前版本供调用方回给客户端。
+ *
+ * 版本号取 max(now, 旧版本+1)：毫秒时间戳在同一毫秒内会重复，
+ * 重复的版本号让「带旧版本号来写」的客户端被误判为最新（漏检冲突）。
+ */
+export async function mutateSnapshot<T>(
+  profile: string,
+  updater: (current: Snapshot<T> | null) => {
+    data: T;
+    deviceId: string;
+    expectUpdatedAt?: number;
+  }
+): Promise<{ updatedAt: number; deviceId: string }> {
+  return withLock(profile, async () => {
+    const current = await readSnapshot<T>(profile);
+    const { data, deviceId, expectUpdatedAt } = updater(current);
+
+    const currentUpdatedAt = current?.updatedAt ?? 0;
+    if (typeof expectUpdatedAt === 'number' && expectUpdatedAt !== currentUpdatedAt) {
+      throw Object.assign(new Error('服务端配置已被其他设备修改'), {
+        code: VERSION_CONFLICT,
+        updatedAt: currentUpdatedAt,
+        deviceId: current?.deviceId ?? '',
+      });
+    }
+
+    const updatedAt = Math.max(Date.now(), currentUpdatedAt + 1);
+    const payload = JSON.stringify({ updatedAt, deviceId, data });
+    assertSize(payload);
+
+    const file = snapshotPath(profile);
+    await fs.mkdir(dataDir(), { recursive: true });
+    const tmp = `${file}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 10)}`;
+    try {
+      await fs.writeFile(tmp, payload, 'utf8');
+      await fs.rename(tmp, file);
+    } catch (err) {
+      await fs.rm(tmp, { force: true }).catch(() => undefined);
+      throw err;
+    }
+
+    return { updatedAt, deviceId };
   });
 }
 
