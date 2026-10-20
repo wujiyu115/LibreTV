@@ -6,6 +6,11 @@ import Hls, { type HlsConfig } from 'hls.js';
 import { Spinner } from './states';
 import { prefersTouchPointer } from '@/lib/touch-pointer';
 import { ART_DEFAULT_CONTROL_HIDE_MS, TOUCH_CONTROL_HIDE_MS } from '@/lib/control-hide';
+import { applyRotate, clearRotate } from '@/lib/orientation';
+
+/** 控制栏里的旋转图标：横屏态（提示去竖屏）画竖版设备 */
+const ROTATE_ICON_LANDSCAPE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:22px;height:22px"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M7 12h10"/></svg>`;
+const ROTATE_ICON_PORTRAIT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:22px;height:22px"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M12 7v10"/></svg>`;
 
 /**
  * 直播播放器：与点播 player-shell 完全独立。
@@ -52,6 +57,8 @@ interface LivePlayerProps {
 
 export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  /** 外层外壳：旋转它而非 containerRef，否则 LIVE 标、OSD、加载/错误遮罩会歪 */
+  const shellRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const artRef = useRef<any>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -297,6 +304,61 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
     const touchPointer = prefersTouchPointer();
     if (touchPointer) Artplayer.CONTROL_HIDE_TIME = TOUCH_CONTROL_HIDE_MS;
 
+    // —— 手动横竖屏切换 ——
+    // 与点播 player-shell 同一套实现（见 lib/orientation）：不依赖 screen.orientation.lock
+    // （iOS 无此 API），用 CSS rotate 把外壳转 90° 铺满视口。
+    // 直播特别需要它：卫视/体育频道几乎都是 16:9，竖屏小窗里看得难受。
+    let rotated = false;
+    // effect 内固定捕获外壳节点：cleanup 阶段 ref.current 可能已置 null
+    const shellEl = shellRef.current;
+    const rotateTarget = () => ({
+      element: shellEl as HTMLElement,
+      body: document.body,
+    });
+    const syncRotateButton = (art: Artplayer) => {
+      art.controls.update({
+        name: 'rotate',
+        tooltip: rotated ? '切换为竖屏' : '切换为横屏',
+        html: rotated ? ROTATE_ICON_PORTRAIT : ROTATE_ICON_LANDSCAPE,
+      });
+    };
+    const toggleRotate = () => {
+      if (!shellEl) return;
+      rotated = !rotated;
+      if (rotated) applyRotate(rotateTarget());
+      else clearRotate(rotateTarget());
+      const current = artRef.current;
+      if (current) syncRotateButton(current);
+      // 旋转改变视口尺寸，通知播放器重算进度条/控制栏布局
+      current?.emit('resize');
+      showHint(rotated ? '横屏' : '竖屏');
+    };
+
+    // 视口尺寸变化时重算旋转尺寸：手动旋转后再转动手机，旧宽高会不匹配（露出背景）
+    let viewportTimer: ReturnType<typeof setTimeout> | null = null;
+    const onViewportChange = () => {
+      if (!rotated) return;
+      // 迟延一拍：iOS 上旋转时的 clientWidth/Height 在事件里可能还是旧值
+      if (viewportTimer) clearTimeout(viewportTimer);
+      viewportTimer = setTimeout(() => {
+        if (!rotated || !shellEl) return;
+        applyRotate(rotateTarget());
+        artRef.current?.emit('resize');
+      }, 200);
+    };
+    window.addEventListener('orientationchange', onViewportChange);
+    window.addEventListener('resize', onViewportChange);
+
+    // 注册旋转按钮（位置与点播播放器一致：网页全屏 60 与全屏 70 之间）
+    controls.push({
+      name: 'rotate',
+      position: 'right',
+      index: 65,
+      html: ROTATE_ICON_LANDSCAPE,
+      tooltip: '切换为横屏',
+      click: () => toggleRotate(),
+    });
+
     const art = new Artplayer({
       container: containerRef.current,
       url,
@@ -335,6 +397,26 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
       },
     });
     artRef.current = art;
+
+    // 进全屏时自动退出手动旋转：两者都接管视口，叠加会转两次（画面侧着）。
+    // 退出全屏后不自动转回，保持用户点按钮时的意图。
+    art.on('fullscreen', (active: boolean) => {
+      if (active && rotated) {
+        rotated = false;
+        clearRotate(rotateTarget());
+        syncRotateButton(art);
+        showHint('已进全屏，已取消旋转');
+      }
+    });
+    // 网页全屏同理：它自己铺满视口，叠加旋转会错位
+    art.on('fullscreenWeb', (active: boolean) => {
+      if (active && rotated) {
+        rotated = false;
+        clearRotate(rotateTarget());
+        syncRotateButton(art);
+        showHint('已进网页全屏，已取消旋转');
+      }
+    });
     art.on('video:loadedmetadata', () => {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -370,6 +452,11 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
       disposed = true;
       clearTimeout(startTimer);
       if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+      // 旋转中切台/卸载必须复位，否则整个页面会停在旋转/锁滚动的状态
+      window.removeEventListener('orientationchange', onViewportChange);
+      window.removeEventListener('resize', onViewportChange);
+      if (viewportTimer) clearTimeout(viewportTimer);
+      if (rotated && shellEl) clearRotate(rotateTarget());
       cleanupEngines();
       art.destroy();
       artRef.current = null;
@@ -381,7 +468,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
   }, [url, retryNonce, onPrevChannel, onNextChannel]);
 
   return (
-    <div className="relative w-full h-full">
+    <div ref={shellRef} className="relative w-full h-full">
       <div ref={containerRef} className="w-full h-full" />
       {/* 起播前的品牌占位图 */}
       {showPoster && !error && (
