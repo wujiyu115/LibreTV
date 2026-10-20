@@ -27,6 +27,10 @@ export const viewport: Viewport = {
   themeColor: '#0b101a',
   width: 'device-width',
   initialScale: 1,
+  // viewport-fit=cover：让页面延伸到刘海/圆角区域，配合 env(safe-area-inset-*)
+  // 才能把手动旋转后的画面用满整块屏幕。默认（contain）下 iOS 会给页面加内边距，
+  // 旋转 90° 后那个内边距会变成左右黑边。
+  viewportFit: 'cover',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

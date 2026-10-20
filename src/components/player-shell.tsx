@@ -18,7 +18,7 @@ import {
   DESKTOP_CONTROL_HIDE_MS,
   TOUCH_CONTROL_HIDE_MS,
 } from '@/lib/control-hide';
-import { applyRotate, clearRotate } from '@/lib/orientation';
+import { applyRotate, clearRotate, rotateHintOnIOS } from '@/lib/orientation';
 
 /** 横屏图标：外框横置，表示「切换到横向」 */
 const ROTATE_ICON_LANDSCAPE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:22px;height:22px"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M7 12h10"/></svg>`;
@@ -366,16 +366,17 @@ export function PlayerShell({
       if (current) syncRotateButton(current);
       // 旋转改变视口尺寸，通知播放器重算进度条/控制栏布局
       current?.emit('resize');
-      showHint(rotated ? '横屏' : '竖屏');
+      showHint(rotated ? rotateHintOnIOS() : '竖屏');
     };
 
-    // 视口尺寸变化时重算旋转尺寸：
-    // 用户没开系统方向锁时，手动旋转后再转动手机，视口会变成横向，
-    // 此时旧的宽高已经不匹配（会露出背景）。重算一次即可贴合新视口。
+    // 视口变化时重算旋转尺寸。
+    // 除了 orientationchange / resize，还要听 visualViewport 的 resize 与 scroll：
+    // iOS 上地址栏/工具栏的显隐只触发这两个事件，不触发 window.resize（布局视口没变），
+    // 只监听 window 的话，工具栏收起后画面底部会一直留着一条黑边。
     let viewportTimer: ReturnType<typeof setTimeout> | null = null;
     const onViewportChange = () => {
       if (!rotated) return;
-      // 迟延一拍：iOS 上旋转时的 clientWidth/Height 在事件里可能还是旧值
+      // 迟延一拍：iOS 上旋转时的尺寸在事件里可能还是旧值
       if (viewportTimer) clearTimeout(viewportTimer);
       viewportTimer = setTimeout(() => {
         if (!rotated || !shellRef.current) return;
@@ -385,6 +386,8 @@ export function PlayerShell({
     };
     window.addEventListener('orientationchange', onViewportChange);
     window.addEventListener('resize', onViewportChange);
+    window.visualViewport?.addEventListener('resize', onViewportChange);
+    window.visualViewport?.addEventListener('scroll', onViewportChange);
 
     const art = new Artplayer({
       container: containerRef.current,
@@ -667,6 +670,8 @@ export function PlayerShell({
       }
       window.removeEventListener('orientationchange', onViewportChange);
       window.removeEventListener('resize', onViewportChange);
+      window.visualViewport?.removeEventListener('resize', onViewportChange);
+      window.visualViewport?.removeEventListener('scroll', onViewportChange);
       if (viewportTimer) clearTimeout(viewportTimer);
       hlsRef.current?.destroy();
       hlsRef.current = null;

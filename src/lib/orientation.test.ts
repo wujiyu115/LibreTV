@@ -1,9 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
   ROTATE_CLASS,
   applyRotate,
   clearRotate,
   computeRotateSize,
+  isIOS,
+  isStandalone,
+  rotateHintOnIOS,
+  visibleViewport,
 } from './orientation';
 
 /** 造一个可控的假容器：ownerDocument 里给固定视口尺寸 */
@@ -24,6 +28,10 @@ function fakeElement(vw: number, vh: number) {
   };
   return { element: element as unknown as HTMLElement, style, classes };
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function fakeBody() {
   const style: Record<string, string> = {};
@@ -120,5 +128,177 @@ describe('clearRotate', () => {
 
     expect(() => clearRotate({ element })).not.toThrow();
     expect(style.transform).toBe('');
+  });
+});
+
+describe('visibleViewport（iOS 工具栏问题的核心）', () => {
+  it('优先用 visualViewport：它是最小可见区', () => {
+    // 布局视口高 844（含被地址栏遮住的部分），实际可见只有 700
+    const { element } = fakeElement(390, 844);
+    vi.stubGlobal('window', {
+      visualViewport: { width: 390, height: 700, offsetTop: 0, offsetLeft: 0 },
+    });
+
+    const box = visibleViewport(element.ownerDocument);
+    expect(box).toEqual({ width: 390, height: 700, offsetTop: 0, offsetLeft: 0 });
+  });
+
+  it('带上 offsetTop/offsetLeft 用于补偿固定定位偏移', () => {
+    const { element } = fakeElement(390, 844);
+    vi.stubGlobal('window', {
+      visualViewport: { width: 390, height: 700, offsetTop: 60, offsetLeft: 0 },
+    });
+
+    expect(visibleViewport(element.ownerDocument).offsetTop).toBe(60);
+  });
+
+  it('没有 visualViewport 时回落到 documentElement（桌面 / 测试环境）', () => {
+    const { element } = fakeElement(1280, 800);
+    vi.stubGlobal('window', { visualViewport: undefined });
+
+    expect(visibleViewport(element.ownerDocument)).toEqual({
+      width: 1280,
+      height: 800,
+      offsetTop: 0,
+      offsetLeft: 0,
+    });
+  });
+
+  it('visualViewport 宽高为 0（键盘收起瞬间 / 隐藏）时不采用', () => {
+    const { element } = fakeElement(390, 844);
+    vi.stubGlobal('window', {
+      visualViewport: { width: 0, height: 0, offsetTop: 0, offsetLeft: 0 },
+    });
+
+    // 回落，避免算出 0×0 把画面压没
+    expect(visibleViewport(element.ownerDocument).width).toBe(390);
+  });
+});
+
+describe('applyRotate 在 iOS 工具栏场景下', () => {
+  it('按可见区而非布局视口算尺寸（回归：底部被工具栏盖住）', () => {
+    const { element, style } = fakeElement(390, 844);
+    // iPhone 14 Safari：布局 844，可见 700（地址栏+工具栏吃掉 144）
+    vi.stubGlobal('window', {
+      visualViewport: { width: 390, height: 700, offsetTop: 0, offsetLeft: 0 },
+    });
+
+    applyRotate({ element });
+
+    // 旋转后视觉宽 = 可见区高 700（不是 844）
+    expect(style.width).toBe('700px');
+    expect(style.height).toBe('390px');
+    expect(style.transform).toBe('rotate(90deg) translate(0, -390px)');
+  });
+
+  it('用 top/left 补偿视觉视口偏移，并清掉 inset 的四向钉死', () => {
+    const { element, style } = fakeElement(390, 844);
+    vi.stubGlobal('window', {
+      visualViewport: { width: 390, height: 700, offsetTop: 60, offsetLeft: 0 },
+    });
+
+    applyRotate({ element });
+
+    expect(style.top).toBe('60px');
+    expect(style.left).toBe('0px');
+    // inset 会覆盖 top/left，必须设成 auto
+    expect(style.inset).toBe('auto');
+  });
+
+  it('先清 inset 再设 top/left（回归：简写属性冲掉定位）', () => {
+    // inset 是 top/right/bottom/left 的简写。若在 top/left 之后赋值，
+    // 会把它们重置为 auto，元素退回静态位置（实测 top:73px left:16px，画面全偏）。
+    const { element, style } = fakeElement(390, 844);
+    vi.stubGlobal('window', {
+      visualViewport: { width: 390, height: 700, offsetTop: 60, offsetLeft: 0 },
+    });
+
+    // 用一个会记录赋值顺序的 style 代理，模拟真实 CSSOM 的简写行为
+    const order: string[] = [];
+    const proxy = new Proxy(style, {
+      set(t, k: string, v: string) {
+        order.push(k);
+        // 真实浏览器里 inset='auto' 会把 top/left 一起复位
+        if (k === 'inset' && v === 'auto') {
+          t.top = '';
+          t.left = '';
+        }
+        t[k] = v;
+        return true;
+      },
+    });
+    (element as unknown as { style: CSSStyleDeclaration }).style = proxy as unknown as CSSStyleDeclaration;
+
+    applyRotate({ element });
+
+    expect(order.indexOf('inset')).toBeLessThan(order.indexOf('top'));
+    expect(style.top).toBe('60px');
+    expect(style.left).toBe('0px');
+  });
+
+  it('clearRotate 把 top/left/inset 都清干净', () => {
+    const { element, style } = fakeElement(390, 844);
+    vi.stubGlobal('window', {
+      visualViewport: { width: 390, height: 700, offsetTop: 60, offsetLeft: 0 },
+    });
+
+    applyRotate({ element });
+    clearRotate({ element });
+
+    expect(style.top).toBe('');
+    expect(style.left).toBe('');
+    expect(style.inset).toBe('');
+  });
+});
+
+describe('isIOS / isStandalone / rotateHintOnIOS', () => {
+  it('识别 iPhone / iPad UA', () => {
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)' });
+    expect(isIOS()).toBe(true);
+
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' });
+    expect(isIOS()).toBe(false);
+  });
+
+  it('iPadOS 13+ 伪装成 Mac 时靠多点触控识别', () => {
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', maxTouchPoints: 5 });
+    expect(isIOS()).toBe(true);
+
+    // 真 Mac 没有多点触控
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', maxTouchPoints: 0 });
+    expect(isIOS()).toBe(false);
+  });
+
+  it('识别 PWA 独立窗口（navigator.standalone 与 display-mode 两条路）', () => {
+    vi.stubGlobal('window', { navigator: { standalone: true } });
+    expect(isStandalone()).toBe(true);
+
+    vi.stubGlobal('window', {
+      navigator: {},
+      matchMedia: (q: string) => ({ matches: q.includes('standalone') }),
+    });
+    expect(isStandalone()).toBe(true);
+
+    vi.stubGlobal('window', { navigator: {}, matchMedia: () => ({ matches: false }) });
+    expect(isStandalone()).toBe(false);
+  });
+
+  it('iOS Safari 下提示语如实说明工具栏去不掉', () => {
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)' });
+    vi.stubGlobal('window', { navigator: { standalone: false }, matchMedia: () => ({ matches: false }) });
+
+    expect(rotateHintOnIOS()).toContain('全屏');
+  });
+
+  it('已装成 PWA 时不再多嘴（本来就没有工具栏）', () => {
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)' });
+    vi.stubGlobal('window', { navigator: { standalone: true } });
+
+    expect(rotateHintOnIOS()).toBe('横屏');
+  });
+
+  it('非 iOS 用普通提示', () => {
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Linux; Android 13)' });
+    expect(rotateHintOnIOS()).toBe('横屏');
   });
 });

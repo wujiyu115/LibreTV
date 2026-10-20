@@ -6,7 +6,7 @@ import Hls, { type HlsConfig } from 'hls.js';
 import { Spinner } from './states';
 import { prefersTouchPointer } from '@/lib/touch-pointer';
 import { ART_DEFAULT_CONTROL_HIDE_MS, TOUCH_CONTROL_HIDE_MS } from '@/lib/control-hide';
-import { applyRotate, clearRotate } from '@/lib/orientation';
+import { applyRotate, clearRotate, rotateHintOnIOS } from '@/lib/orientation';
 
 /** 控制栏里的旋转图标：横屏态（提示去竖屏）画竖版设备 */
 const ROTATE_ICON_LANDSCAPE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:22px;height:22px"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M7 12h10"/></svg>`;
@@ -331,14 +331,16 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
       if (current) syncRotateButton(current);
       // 旋转改变视口尺寸，通知播放器重算进度条/控制栏布局
       current?.emit('resize');
-      showHint(rotated ? '横屏' : '竖屏');
+      showHint(rotated ? rotateHintOnIOS() : '竖屏');
     };
 
-    // 视口尺寸变化时重算旋转尺寸：手动旋转后再转动手机，旧宽高会不匹配（露出背景）
+    // 视口变化时重算旋转尺寸。
+    // 除 orientationchange / resize 外必须听 visualViewport：iOS 地址栏/工具栏显隐
+    // 只触发它，不触发 window.resize，漏听会留一条永久黑边。
     let viewportTimer: ReturnType<typeof setTimeout> | null = null;
     const onViewportChange = () => {
       if (!rotated) return;
-      // 迟延一拍：iOS 上旋转时的 clientWidth/Height 在事件里可能还是旧值
+      // 迟延一拍：iOS 上旋转时的尺寸在事件里可能还是旧值
       if (viewportTimer) clearTimeout(viewportTimer);
       viewportTimer = setTimeout(() => {
         if (!rotated || !shellEl) return;
@@ -348,6 +350,8 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
     };
     window.addEventListener('orientationchange', onViewportChange);
     window.addEventListener('resize', onViewportChange);
+    window.visualViewport?.addEventListener('resize', onViewportChange);
+    window.visualViewport?.addEventListener('scroll', onViewportChange);
 
     // 注册旋转按钮（位置与点播播放器一致：网页全屏 60 与全屏 70 之间）
     controls.push({
@@ -455,6 +459,8 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
       // 旋转中切台/卸载必须复位，否则整个页面会停在旋转/锁滚动的状态
       window.removeEventListener('orientationchange', onViewportChange);
       window.removeEventListener('resize', onViewportChange);
+      window.visualViewport?.removeEventListener('resize', onViewportChange);
+      window.visualViewport?.removeEventListener('scroll', onViewportChange);
       if (viewportTimer) clearTimeout(viewportTimer);
       if (rotated && shellEl) clearRotate(rotateTarget());
       cleanupEngines();
