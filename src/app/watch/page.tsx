@@ -197,7 +197,8 @@ function WatchContent() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="sticky top-0 z-40 bg-surface/90 backdrop-blur border-b border-line">
+      {/* safe-top：与首页顶栏一致，避免 iOS 上标题被状态栏/刘海遮住 */}
+      <header className="sticky top-0 z-40 bg-surface/90 backdrop-blur border-b border-line safe-top">
         <div className="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
           <BackButton />
           <HomeButton />

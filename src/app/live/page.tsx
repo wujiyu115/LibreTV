@@ -401,6 +401,9 @@ function LiveContent() {
             className={cn(
               'bg-surface-raised border border-line flex-col overflow-hidden',
               'fixed inset-x-0 bottom-0 z-40 h-[75vh] rounded-t-2xl shadow-2xl',
+              // safe-bottom：手机底部抽屉贴着物理底边，
+              // 不给内边距的话最后一排频道会被 Home 指示条盖住、点不到
+              'safe-bottom',
               listOpen ? 'flex' : 'hidden',
               'lg:sticky lg:top-20 lg:flex lg:h-[calc(100vh-6.5rem)] lg:rounded-xl lg:shadow-none'
             )}
