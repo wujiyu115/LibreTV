@@ -13,14 +13,6 @@ import path from 'node:path';
 
 const css = readFileSync(path.resolve(__dirname, '../app/globals.css'), 'utf8');
 
-/** 取出某个选择器块的内容 */
-function blockOf(selector: string): string {
-  const idx = css.indexOf(`${selector} {`);
-  if (idx < 0) throw new Error(`未找到选择器 ${selector}`);
-  const end = css.indexOf('}', idx);
-  return css.slice(idx, end);
-}
-
 describe('安全区工具类', () => {
   it('四个方向都有对应工具类', () => {
     for (const sel of ['.safe-top', '.safe-bottom', '.safe-x', '.safe-all']) {
@@ -39,42 +31,24 @@ describe('安全区工具类', () => {
   });
 });
 
-describe('旋转态的安全区映射', () => {
-  it('.ltv-rotate 存在且四向都有 padding', () => {
-    const block = blockOf('.ltv-rotate');
-    for (const dir of ['padding-top', 'padding-right', 'padding-bottom', 'padding-left']) {
-      expect(block, dir).toContain(dir);
-    }
-  });
-
+describe('旋转容器不能带安全区内边距（回归）', () => {
   /**
-   * 方向推导（transform = rotate(90deg) translate(0,-vw)，origin 0 0）：
-   *   本地点 (x,y) → (x, y-vw) → 旋转 → (vw-y, x)
-   *   本地左边 → 物理上边；本地右边 → 物理下边
+   * 曾经的错误：把 safe-area 映射成 padding 打到被旋转的视频容器上。
    *
-   * 竖屏锁定（该按钮的主要场景）只有 inset-top（刘海）与 inset-bottom（Home 条）
-   * 非零，所以：
-   *   padding-left  ← inset-top     （避开刘海）
-   *   padding-right ← inset-bottom  （避开 Home 条）
+   * 为什么错：rotate(90deg) 后刘海落在画面的**长边**方向，而视频本来就该
+   * 铺满那条边。加 padding 只会把画面往里挤——实测 iPhone 14 上
+   * padding-left:47 + padding-right:34 让 844px 的可用长度缩到 763px，
+   * 即画面两端各多出一条黑边，尺寸正好等于 inset 值。
    *
-   * 实测：padding-left:47 / padding-right:34 时，内容区在屏幕上落在 y=47..666，
-   * 即刘海侧留出 47、底部留出 34，方向正确。
+   * 正确做法：旋转容器保持满屏无 padding；安全区只用在有交互的元素上
+   * （页面顶栏 / 底部抽屉），播放器控件由 ArtPlayer 自己内缩。
    */
-  it('本地 left 对应 inset-top（刘海侧）', () => {
-    const block = blockOf('.ltv-rotate');
-    const leftRule = block.match(/padding-left:\s*([^;]+);/)?.[1] ?? '';
-    expect(leftRule).toContain('safe-area-inset-top');
+  it('样式表里不再存在 .ltv-rotate 的 padding 规则', () => {
+    expect(css.includes('.ltv-rotate')).toBe(false);
   });
 
-  it('本地 right 对应 inset-bottom（Home 指示条侧）', () => {
-    const block = blockOf('.ltv-rotate');
-    const rightRule = block.match(/padding-right:\s*([^;]+);/)?.[1] ?? '';
-    expect(rightRule).toContain('safe-area-inset-bottom');
-  });
-
-  it('不会把 inset-top 错配到 padding-top（写反的典型错误）', () => {
-    const block = blockOf('.ltv-rotate');
-    const topRule = block.match(/padding-top:\s*([^;]+);/)?.[1] ?? '';
-    expect(topRule).not.toContain('safe-area-inset-top');
+  it('旋转相关的 class 名不与 safe-* 工具类混用', () => {
+    // 旋转容器上的 class 由 lib/orientation 添加，不能是 safe-* 系列
+    expect(css).not.toMatch(/\.ltv-rotate\s*\{[^}]*padding/s);
   });
 });

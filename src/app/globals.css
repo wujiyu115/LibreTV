@@ -188,26 +188,4 @@ body {
   }
 }
 
-/* 手动旋转（lib/orientation）期间，安全区方向要跟着转 90°。
- *
- * 推导（transform = rotate(90deg) translate(0,-vw)，origin 0 0）：
- *   本地点 (x,y) → 先平移 (x, y-vw) → 再旋转 → (vw-y, x)
- *   代入四角：本地(0,0)→(vw,0)；本地(0,vh)→(0,0)；本地(w,0)→(vw,vh)
- *   所以：本地左边 → 物理上方，本地右边 → 物理下方，
- *         本地上边 → 物理右方，本地下边 → 物理左方。
- *
- * 竖屏锁定（这个按钮的主要使用场景）时 inset 只有 top（刘海）和 bottom（Home 条），
- * left/right 为 0。因此真正起作用的是：
- *   本地 left  = inset-top    —— 避开刘海
- *   本地 right = inset-bottom —— 避开 Home 指示条
- * 上下两个方向对应物理左右，竖屏下恒为 0，写上只是为了映射完整。
- *
- * 写反的后果很直观：刘海那侧的留白跑到画面底部，视频看起来莫名偏了一块。
- * padding 不会撑破尺寸：全局 preflight 是 border-box。
- */
-.ltv-rotate {
-  padding-top: env(safe-area-inset-left, 0px);
-  padding-right: env(safe-area-inset-bottom, 0px);
-  padding-bottom: env(safe-area-inset-right, 0px);
-  padding-left: env(safe-area-inset-top, 0px);
-}
+
