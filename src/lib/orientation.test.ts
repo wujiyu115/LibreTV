@@ -7,6 +7,7 @@ import {
   isIOS,
   isStandalone,
   rotateHintOnIOS,
+  rotatedSeekRatio,
   visibleViewport,
 } from './orientation';
 
@@ -300,5 +301,40 @@ describe('isIOS / isStandalone / rotateHintOnIOS', () => {
   it('非 iOS 用普通提示', () => {
     vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Linux; Android 13)' });
     expect(rotateHintOnIOS()).toBe('横屏');
+  });
+});
+
+describe('rotatedSeekRatio：旋转态进度条纵向换算', () => {
+  /**
+   * 旋转后进度条是竖条（实测视觉尺寸 26×824），而 ArtPlayer 仍用
+   * clientX / 未变换的 clientWidth(824) 换算，纵向点击时 clientX 恒定，
+   * 比例恒为 0 —— 这就是「点进度条总跳回开头」的根因。
+   * 实测 60s 片源：修复前点 25/50/75% 全部落到约 1.4s。
+   */
+  const rect = { top: 10, height: 800 };
+
+  it('顶部对应 0，底部对应 1', () => {
+    expect(rotatedSeekRatio(10, rect)).toBe(0);
+    expect(rotatedSeekRatio(810, rect)).toBe(1);
+  });
+
+  it('中点对应 0.5', () => {
+    expect(rotatedSeekRatio(410, rect)).toBeCloseTo(0.5, 6);
+  });
+
+  it('25% / 75% 按纵向线性插值', () => {
+    expect(rotatedSeekRatio(210, rect)).toBeCloseTo(0.25, 6);
+    expect(rotatedSeekRatio(610, rect)).toBeCloseTo(0.75, 6);
+  });
+
+  it('落在进度条之外时夹到 [0,1]，避免 seek 越界', () => {
+    expect(rotatedSeekRatio(-500, rect)).toBe(0);
+    expect(rotatedSeekRatio(5000, rect)).toBe(1);
+  });
+
+  it('高度为 0 时返回 0 而不是 NaN/Infinity', () => {
+    // 进度条未布局完成时 rect.height 可能是 0，除零会得到 Infinity，
+    // 进而 currentTime = Infinity 触发 video 报错
+    expect(rotatedSeekRatio(100, { top: 0, height: 0 })).toBe(0);
   });
 });

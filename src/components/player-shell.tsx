@@ -18,7 +18,7 @@ import {
   DESKTOP_CONTROL_HIDE_MS,
   TOUCH_CONTROL_HIDE_MS,
 } from '@/lib/control-hide';
-import { applyRotate, clearRotate, rotateHintOnIOS } from '@/lib/orientation';
+import { applyRotate, clearRotate, rotatedSeekRatio, rotateHintOnIOS } from '@/lib/orientation';
 
 /** 横屏图标：外框横置，表示「切换到横向」 */
 const ROTATE_ICON_LANDSCAPE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:22px;height:22px"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M7 12h10"/></svg>`;
@@ -565,6 +565,39 @@ export function PlayerShell({
     };
     document.addEventListener('keydown', shortcuts);
 
+    /**
+     * 旋转态下接管进度条的触摸定位。
+     *
+     * 为什么需要：进度条旋转后视觉上是竖条（实测 26×824），但 ArtPlayer 的点击
+     * 换算始终用 clientX 除以「未变换的」clientWidth（824）。纵向拖动时 clientX
+     * 几乎不变，比例恒为 0，表现就是「点哪里都跳回开头」。
+     * 实测 60s 片源：旋转后点 25%/50%/75% 全部落到约 1.4s。
+     *
+     * 用 capture 阶段拦截：必须早于 ArtPlayer 自己的冒泡监听执行，
+     * 否则它已经按错误的横轴算过一次并 seek 了。passive:false 才能 preventDefault。
+     */
+    const progressEl = containerRef.current?.querySelector('.art-progress') as HTMLElement | null;
+    const onProgressTouch = (e: TouchEvent) => {
+      if (!rotated || e.touches.length !== 1) return;
+      const current = artRef.current;
+      const el = progressEl;
+      if (!current || !el) return;
+      const duration = current.duration;
+      if (!Number.isFinite(duration) || duration <= 0) return;
+      const ratio = rotatedSeekRatio(e.touches[0].clientY, el.getBoundingClientRect());
+      const second = ratio * duration;
+      current.currentTime = second;
+      // 进度条视觉也立刻跟上：否则要等下一次 timeupdate（约 250ms）才更新，
+      // 手感上像是「点了没反应」，用户会连点
+      current.emit('setBar', 'played', ratio, e);
+      e.stopPropagation();
+      e.preventDefault();
+    };
+    // touchstart 与 touchmove 都要挂：只挂 start 的话，按住往下拖不会跟随，
+    // 手感上像「拖不动」，用户会以为进度条坏了
+    progressEl?.addEventListener('touchstart', onProgressTouch, { capture: true, passive: false });
+    progressEl?.addEventListener('touchmove', onProgressTouch, { capture: true, passive: false });
+
     // —— 移动端长按 3 倍速 ——
     let longPressTimer: ReturnType<typeof setTimeout> | null = null;
     let isLongPress = false;
@@ -668,6 +701,8 @@ export function PlayerShell({
         rotated = false;
         if (shellEl) clearRotate({ element: shellEl, body: document.body });
       }
+      progressEl?.removeEventListener('touchstart', onProgressTouch, { capture: true });
+      progressEl?.removeEventListener('touchmove', onProgressTouch, { capture: true });
       window.removeEventListener('orientationchange', onViewportChange);
       window.removeEventListener('resize', onViewportChange);
       window.visualViewport?.removeEventListener('resize', onViewportChange);

@@ -179,3 +179,31 @@ export function isStandalone(): boolean {
 export function rotateHintOnIOS(): string {
   return isIOS() && !isStandalone() ? '横屏（iOS 全屏可隐藏工具栏）' : '横屏';
 }
+
+/**
+ * 旋转态下，把触摸点的纵向位置换算成播放进度比例。
+ *
+ * 为什么需要这个：进度条在旋转后视觉上是一条**竖条**，但 ArtPlayer 的点击换算
+ * （dist 里的 `ht()`）始终用 `clientX - rect.left` 再除以 `clientWidth`：
+ *
+ *   const o = clamp((e.clientX - progressRect.left), 0, progress.clientWidth)
+ *   const percent = o / progress.clientWidth
+ *
+ * 旋转 90° 后 `getBoundingClientRect()` 已经变成竖条（实测 26×824），而
+ * `clientWidth/clientHeight` 仍是**未变换**的布局尺寸（824×26）。于是纵向拖动时
+ * `clientX` 几乎恒定，算出的比例恒为 0——表现就是「点进度条总跳回开头」。
+ *
+ * 实测（iPhone UA + 可 seek 的 HLS，60s 片源）：
+ *   旋转后点 25% / 50% / 75% → 全部落到约 1.4s（开头）
+ *
+ * 换算用 rect 的**视觉**高度（旋转后即进度轴长度），与手指实际看到的一致。
+ */
+export function rotatedSeekRatio(
+  clientY: number,
+  rect: { top: number; height: number },
+): number {
+  if (!rect.height) return 0;
+  const raw = (clientY - rect.top) / rect.height;
+  // 手指可能落在进度条两端之外，夹到 [0,1]，否则 seek 会越界
+  return Math.min(1, Math.max(0, raw));
+}
